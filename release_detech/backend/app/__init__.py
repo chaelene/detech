@@ -1,0 +1,1 @@
+"""DETECH Backend Application"""
