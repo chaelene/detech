@@ -12,14 +12,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis
 
-from app.models.config import Settings
-from app.services.streaming import (
+from .app.models.config import Settings
+from .app.services.streaming import (
     AlertManager,
     MediaSessionHandle,
     MQTTService,
     StreamingService,
 )
-from app.services.swarm import SwarmCoordinator
+from .app.services.swarm import SwarmCoordinator
 from backend.utils.x402 import X402Handler
 from shared.solana_utils import MockSolanaTransactor, SolanaUSDCTransactor
 from backend.routes.stream import router as stream_router

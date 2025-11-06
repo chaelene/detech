@@ -294,9 +294,19 @@ class DetectorService:
             self._network_loop_running = True
 
     def _stop_network_loop(self, *, force: bool = False) -> None:
-        if self._network_loop_running:
-            self.client.loop_stop(force=force)
-            self._network_loop_running = False
+        if not self._network_loop_running:
+            return
+
+        try:
+            if force:
+                self.client.loop_stop(force=True)
+            else:
+                self.client.loop_stop()
+        except TypeError:
+            # Older versions of paho-mqtt do not accept the force kwarg
+            self.client.loop_stop()
+
+        self._network_loop_running = False
 
     async def _ensure_firewall_allows_port(self) -> None:
         if self._firewall_checked:
