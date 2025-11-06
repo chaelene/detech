@@ -105,11 +105,11 @@ class MQTTService:
                 logger.info("Connecting to MQTT broker %s:%s", self._hostname, self._port)
                 async with aiomqtt.Client(hostname=self._hostname, port=self._port) as client:
                     self._client = client
-                    messages_ctx = getattr(client, "messages", None)
-                    if callable(messages_ctx):
-                        context_manager = messages_ctx()
+                    messages_attr = getattr(client, "messages", None)
+                    if callable(messages_attr):
+                        context_manager = messages_attr()
                     else:
-                        context_manager = messages_ctx
+                        context_manager = messages_attr
 
                     if context_manager and hasattr(context_manager, "__aenter"):
                         async with context_manager as messages:
@@ -119,8 +119,10 @@ class MQTTService:
                             async for message in messages:
                                 await self._handle_alert_message(message)
                     else:
-                        logger.warning("aiomqtt Client.messages is not an async context manager; falling back to ISO interface")
-                        async with client.messages() as messages:  # type: ignore[attr-defined]
+                        legacy_ctx = getattr(client, "messages", None)
+                        if not callable(legacy_ctx):
+                            raise AttributeError("aiomqtt client exposes no usable messages iterator")
+                        async with legacy_ctx() as messages:
                             await client.subscribe(self._alerts_topic)
                             self._connected.set()
                             logger.info("MQTT connected; subscribed to %s", self._alerts_topic)
