@@ -23,7 +23,7 @@ from aiomqtt import MqttError
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
-from app.models.config import Settings
+from ..models.config import Settings
 
 logger = logging.getLogger(__name__)
 
