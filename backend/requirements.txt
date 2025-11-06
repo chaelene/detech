@@ -4,7 +4,6 @@ python-socketio>=5.10.0
 python-multipart>=0.0.6
 pydantic>=2.5.0
 pydantic-settings>=2.1.0
-mediasoup-server>=4.0.0
 solana>=0.30.0
 solders>=0.18.0
 base58>=2.1.1
