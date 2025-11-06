@@ -1,4 +1,4 @@
-"""x402 micropayment handler triggered from alert broadcasts."""
+"""Utilities for interacting with Solana x402 payment helpers."""
 
 from __future__ import annotations
 
@@ -10,7 +10,8 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Optional
 
-from app.models.config import Settings
+from ..app.models.config import Settings
+from ..app.services.streaming import AlertManager
 from shared.solana_utils import SolanaUSDCTransactor, TransferResult, USDCTransferError
 
 logger = logging.getLogger(__name__)

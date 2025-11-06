@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from importlib import util as importlib_util
 from pathlib import Path
 from typing import Any, Dict, Optional
 import sys
+import types
 
 from redis.asyncio import Redis
 
@@ -13,7 +15,26 @@ SWARM_SRC = Path(__file__).resolve().parents[3] / "swarm-agents" / "src"
 if str(SWARM_SRC) not in sys.path:
     sys.path.append(str(SWARM_SRC))
 
-from agents import InterpreterAgent, RefinerAgent
+_AGENTS_MODULE_PATH = SWARM_SRC / "agents.py"
+if not _AGENTS_MODULE_PATH.is_file():
+    raise RuntimeError(f"Expected swarm agents module at {_AGENTS_MODULE_PATH}")
+
+swarm_pkg = types.ModuleType("swarm_agents")
+swarm_pkg.__path__ = [str(SWARM_SRC)]
+sys.modules.setdefault("swarm_agents", swarm_pkg)
+
+_spec = importlib_util.spec_from_file_location(
+    "swarm_agents.agents", str(_AGENTS_MODULE_PATH), submodule_search_locations=[str(SWARM_SRC)]
+)
+if _spec is None or _spec.loader is None:
+    raise ImportError("Unable to load swarm agents module")
+
+_agents_module = importlib_util.module_from_spec(_spec)
+sys.modules["swarm_agents.agents"] = _agents_module
+_spec.loader.exec_module(_agents_module)
+
+InterpreterAgent = _agents_module.InterpreterAgent
+RefinerAgent = _agents_module.RefinerAgent
 
 
 class SwarmCoordinator:

@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 import aiomqtt
-from aiomqtt.error import MqttError
+from aiomqtt import MqttError
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
