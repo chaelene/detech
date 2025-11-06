@@ -12,18 +12,27 @@ from typing import Optional
 import uuid
 
 from nacl.signing import SigningKey
-from solana.publickey import PublicKey
-from solana.rpc.async_api import AsyncClient
-from solana.rpc.commitment import Confirmed
-from solana.rpc.types import TxOpts
-from solana.transaction import Transaction
-from spl.token.constants import TOKEN_PROGRAM_ID
-from spl.token.instructions import (
-    TransferCheckedParams,
-    create_associated_token_account,
-    get_associated_token_address,
-    transfer_checked,
-)
+
+try:  # Optional Solana dependencies
+    from solana.publickey import PublicKey
+    from solana.rpc.async_api import AsyncClient
+    from solana.rpc.commitment import Confirmed
+    from solana.rpc.types import TxOpts
+    from solana.transaction import Transaction
+    from spl.token.constants import TOKEN_PROGRAM_ID
+    from spl.token.instructions import (
+        TransferCheckedParams,
+        create_associated_token_account,
+        get_associated_token_address,
+        transfer_checked,
+    )
+
+    _SOLANA_STACK_AVAILABLE = True
+except ModuleNotFoundError:  # pragma: no cover - optional dependency missing
+    PublicKey = AsyncClient = Confirmed = TxOpts = Transaction = None  # type: ignore
+    TOKEN_PROGRAM_ID = None  # type: ignore
+    TransferCheckedParams = create_associated_token_account = get_associated_token_address = transfer_checked = None  # type: ignore
+    _SOLANA_STACK_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -68,128 +77,143 @@ def _to_raw_amount(amount: Decimal) -> int:
     return int(scaled)
 
 
-class SolanaUSDCTransactor:
-    """Thin async wrapper around solana-py for sending USDC transfers with retries."""
+if _SOLANA_STACK_AVAILABLE:
 
-    def __init__(
-        self,
-        *,
-        rpc_url: str,
-        agent_secret: Optional[str] = None,
-        usdc_mint: str = USDC_MINT_MAINNET,
-        max_retries: int = 3,
-        backoff_seconds: float = 0.5,
-    ) -> None:
-        self._client = AsyncClient(rpc_url, commitment=Confirmed)
-        self._agent = _load_keypair(agent_secret or DEFAULT_TEST_AGENT_SECRET)
-        self._agent_pubkey = PublicKey(self._agent.verify_key.encode())
-        self._usdc_mint = PublicKey(usdc_mint)
-        self._max_retries = max(1, max_retries)
-        self._backoff_seconds = max(0.0, backoff_seconds)
-        self._agent_ata: Optional[PublicKey] = None
+    class SolanaUSDCTransactor:
+        """Thin async wrapper around solana-py for sending USDC transfers with retries."""
 
-    @property
-    def agent_pubkey(self) -> PublicKey:
-        return self._agent_pubkey
+        def __init__(
+            self,
+            *,
+            rpc_url: str,
+            agent_secret: Optional[str] = None,
+            usdc_mint: str = USDC_MINT_MAINNET,
+            max_retries: int = 3,
+            backoff_seconds: float = 0.5,
+        ) -> None:
+            self._client = AsyncClient(rpc_url, commitment=Confirmed)
+            self._agent = _load_keypair(agent_secret or DEFAULT_TEST_AGENT_SECRET)
+            self._agent_pubkey = PublicKey(self._agent.verify_key.encode())
+            self._usdc_mint = PublicKey(usdc_mint)
+            self._max_retries = max(1, max_retries)
+            self._backoff_seconds = max(0.0, backoff_seconds)
+            self._agent_ata: Optional[PublicKey] = None
 
-    async def close(self) -> None:
-        await self._client.close()
+        @property
+        def agent_pubkey(self) -> PublicKey:
+            return self._agent_pubkey
 
-    async def transfer_usdc(
-        self,
-        *,
-        user_secret: str,
-        amount: Decimal,
-        reference: Optional[str] = None,
-    ) -> TransferResult:
-        payer = _load_keypair(user_secret)
-        source_owner = PublicKey(payer.verify_key.encode())
-        destination_owner = self._agent_pubkey
+        async def close(self) -> None:
+            await self._client.close()
 
-        source_token = await self._ensure_token_account(owner=source_owner, payer=payer)
-        destination_token = await self._ensure_agent_token_account()
+        async def transfer_usdc(
+            self,
+            *,
+            user_secret: str,
+            amount: Decimal,
+            reference: Optional[str] = None,
+        ) -> TransferResult:
+            payer = _load_keypair(user_secret)
+            source_owner = PublicKey(payer.verify_key.encode())
+            destination_owner = self._agent_pubkey
 
-        raw_amount = _to_raw_amount(amount)
+            source_token = await self._ensure_token_account(owner=source_owner, payer=payer)
+            destination_token = await self._ensure_agent_token_account()
 
-        last_exc: Optional[Exception] = None
-        for attempt in range(1, self._max_retries + 1):
-            try:
-                transaction = await self._build_transfer_transaction(
-                    payer=payer,
-                    source_token=source_token,
-                    destination_token=destination_token,
-                    raw_amount=raw_amount,
+            raw_amount = _to_raw_amount(amount)
+
+            last_exc: Optional[Exception] = None
+            for attempt in range(1, self._max_retries + 1):
+                try:
+                    transaction = await self._build_transfer_transaction(
+                        payer=payer,
+                        source_token=source_token,
+                        destination_token=destination_token,
+                        raw_amount=raw_amount,
+                    )
+                    response = await self._client.send_transaction(
+                        transaction,
+                        payer,
+                        opts=TxOpts(skip_preflight=False, preflight_commitment=Confirmed),
+                    )
+                    signature = response.value
+                    if not isinstance(signature, str):  # pragma: no cover - defensive
+                        signature = str(signature)
+                    logger.info(
+                        "x402 transfer success",
+                        extra={"signature": signature, "attempt": attempt, "reference": reference},
+                    )
+                    return TransferResult(signature=signature, attempt=attempt)
+                except Exception as exc:  # pragma: no cover - environment specific errors
+                    last_exc = exc
+                    logger.warning("USDC transfer attempt %s failed: %s", attempt, exc)
+                    if attempt >= self._max_retries:
+                        break
+                    await asyncio.sleep(self._backoff_seconds * (2 ** (attempt - 1)))
+
+            raise USDCTransferError(str(last_exc))
+
+        async def _ensure_agent_token_account(self) -> PublicKey:
+            if self._agent_ata is None:
+                self._agent_ata = await self._ensure_token_account(owner=self._agent_pubkey, payer=self._agent)
+            return self._agent_ata
+
+        async def _ensure_token_account(self, *, owner: PublicKey, payer: SigningKey) -> PublicKey:
+            ata = get_associated_token_address(owner, self._usdc_mint)
+            info = await self._client.get_account_info(ata)
+            if info.value is None:
+                transaction = Transaction()
+                transaction.add(
+                    create_associated_token_account(
+                        payer=PublicKey(payer.verify_key.encode()),
+                        owner=owner,
+                        mint=self._usdc_mint,
+                    )
                 )
-                response = await self._client.send_transaction(
+                latest_blockhash = await self._client.get_latest_blockhash()
+                transaction.recent_blockhash = latest_blockhash.value.blockhash
+                transaction.fee_payer = PublicKey(payer.verify_key.encode())
+                transaction.sign(payer)
+                await self._client.send_transaction(
                     transaction,
                     payer,
                     opts=TxOpts(skip_preflight=False, preflight_commitment=Confirmed),
                 )
-                signature = response.value
-                if not isinstance(signature, str):  # pragma: no cover - defensive
-                    signature = str(signature)
-                logger.info(
-                    "x402 transfer success", extra={"signature": signature, "attempt": attempt, "reference": reference}
-                )
-                return TransferResult(signature=signature, attempt=attempt)
-            except Exception as exc:  # pragma: no cover - network errors are environment-specific
-                last_exc = exc
-                logger.warning("USDC transfer attempt %s failed: %s", attempt, exc)
-                if attempt >= self._max_retries:
-                    break
-                await asyncio.sleep(self._backoff_seconds * (2 ** (attempt - 1)))
+            return ata
 
-        raise USDCTransferError(str(last_exc))
-
-    async def _ensure_agent_token_account(self) -> PublicKey:
-        if self._agent_ata is None:
-            self._agent_ata = await self._ensure_token_account(owner=self._agent_pubkey, payer=self._agent)
-        return self._agent_ata
-
-    async def _ensure_token_account(self, *, owner: PublicKey, payer: SigningKey) -> PublicKey:
-        ata = get_associated_token_address(owner, self._usdc_mint)
-        info = await self._client.get_account_info(ata)
-        if info.value is None:
-            transaction = Transaction()
-            transaction.add(
-                create_associated_token_account(
-                    payer=PublicKey(payer.verify_key.encode()),
-                    owner=owner,
-                    mint=self._usdc_mint,
-                )
+        async def _build_transfer_transaction(
+            self,
+            *,
+            payer: SigningKey,
+            source_token: PublicKey,
+            destination_token: PublicKey,
+            raw_amount: int,
+        ) -> Transaction:
+            params = TransferCheckedParams(
+                program_id=TOKEN_PROGRAM_ID,
+                source=source_token,
+                mint=self._usdc_mint,
+                dest=destination_token,
+                authority=PublicKey(payer.verify_key.encode()),
+                amount=raw_amount,
+                decimals=USDC_DECIMALS,
+                signers=[],
             )
+            transaction = Transaction()
+            transaction.add(transfer_checked(params))
             latest_blockhash = await self._client.get_latest_blockhash()
             transaction.recent_blockhash = latest_blockhash.value.blockhash
             transaction.fee_payer = PublicKey(payer.verify_key.encode())
-            transaction.sign_partial(SigningKey(payer.encode() + payer.verify_key.encode()))
-            await self._client.send_transaction(transaction, SigningKey(payer.encode() + payer.verify_key.encode()), opts=TxOpts(skip_preflight=False, preflight_commitment=Confirmed))
-        return ata
+            transaction.sign(payer)
+            return transaction
 
-    async def _build_transfer_transaction(
-        self,
-        *,
-        payer: SigningKey,
-        source_token: PublicKey,
-        destination_token: PublicKey,
-        raw_amount: int,
-    ) -> Transaction:
-        params = TransferCheckedParams(
-            program_id=TOKEN_PROGRAM_ID,
-            source=source_token,
-            mint=self._usdc_mint,
-            dest=destination_token,
-            authority=payer.verify_key.to_bytes(),
-            amount=raw_amount,
-            decimals=USDC_DECIMALS,
-            signers=[],
-        )
-        transaction = Transaction()
-        transaction.add(transfer_checked(params))
-        latest_blockhash = await self._client.get_latest_blockhash()
-        transaction.recent_blockhash = latest_blockhash.value.blockhash
-        transaction.fee_payer = payer.verify_key.to_bytes()
-        transaction.sign(payer)
-        return transaction
+else:
+
+    class SolanaUSDCTransactor:  # pragma: no cover - only used when solana stack missing
+        def __init__(self, *args, **kwargs) -> None:  # noqa: D401,ANN001
+            raise ImportError(
+                "Solana dependencies are not installed. Enable x402_mock_transfers or install solana python SDK."
+            )
 
 
 class MockSolanaTransactor:
