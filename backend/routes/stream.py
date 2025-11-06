@@ -7,7 +7,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket
 from starlette import status
 
-from app.services.streaming import AlertManager, RateLimitExceeded, StreamingService
+from ..app.services.streaming import AlertManager, RateLimitExceeded, StreamingService
 from backend.models.schemas import HealthResponse, StreamAnswer, StreamOffer
 
 logger = logging.getLogger(__name__)
