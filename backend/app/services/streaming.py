@@ -110,12 +110,31 @@ class MQTTService:
                         context_manager = messages_ctx()
                     else:
                         context_manager = messages_ctx
-                    async with context_manager as messages:
-                        await client.subscribe(self._alerts_topic)
-                        self._connected.set()
-                        logger.info("MQTT connected; subscribed to %s", self._alerts_topic)
-                        async for message in messages:
-                            await self._handle_alert_message(message)
+
+                    if context_manager is None:
+                        logger.warning("aiomqtt client lacks messages interface; fallback to unfiltered messages")
+                        async with client.unfiltered_messages() as messages:
+                            await client.subscribe(self._alerts_topic)
+                            self._connected.set()
+                            logger.info("MQTT connected; subscribed to %s", self._alerts_topic)
+                            async for message in messages:
+                                await self._handle_alert_message(message)
+                    else:
+                        if not hasattr(context_manager, "__aenter"):
+                            # Not an async context manager; treat as async iterator factory
+                            async with client.unfiltered_messages() as messages:
+                                await client.subscribe(self._alerts_topic)
+                                self._connected.set()
+                                logger.info("MQTT connected; subscribed to %s", self._alerts_topic)
+                                async for message in messages:
+                                    await self._handle_alert_message(message)
+                        else:
+                            async with context_manager as messages:
+                                await client.subscribe(self._alerts_topic)
+                                self._connected.set()
+                                logger.info("MQTT connected; subscribed to %s", self._alerts_topic)
+                                async for message in messages:
+                                    await self._handle_alert_message(message)
             except asyncio.CancelledError:
                 logger.debug("MQTT connection loop cancelled")
                 break
