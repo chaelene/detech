@@ -1,0 +1,128 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: detech-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", "", "--protected-mode", "no"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - detech
+
+  mqtt:
+    image: eclipse-mosquitto:2.0
+    container_name: detech-mqtt
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./docker/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    healthcheck:
+      test: ["CMD", "mosquitto_pub", "-h", "localhost", "-t", "health/ready", "-m", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - detech
+
+  swarm:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.swarm
+    container_name: detech-swarm
+    restart: unless-stopped
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - SWARM_MOCK_MODE=1
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - detech
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    container_name: detech-backend
+    restart: unless-stopped
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - MQTT_BROKER_HOST=mqtt
+      - MQTT_BROKER_PORT=1883
+      - SWARM_API_URL=http://swarm:8001
+      - SOLANA_RPC_URL=${SOLANA_RPC_URL:-https://api.devnet.solana.com}
+      - FRAME_SAMPLE_INTERVAL_SECONDS=1.0
+      - SWARM_MOCK_MODE=1
+      - X402_MOCK_TRANSFERS=1
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - ./shared:/shared
+    depends_on:
+      redis:
+        condition: service_healthy
+      mqtt:
+        condition: service_started
+      swarm:
+        condition: service_started
+    networks:
+      - detech
+
+  jetson:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.jetson-sim
+    container_name: detech-jetson
+    restart: unless-stopped
+    environment:
+      - MQTT_BROKER_HOST=mqtt
+      - MQTT_BROKER_PORT=1883
+      - FRAMES_TOPIC=detech/frames
+      - ALERTS_TOPIC=detech/alerts
+      - DETECH_CPU_MODE=1
+    command: ["python", "-m", "src.mock_cpu_detector"]
+    depends_on:
+      mqtt:
+        condition: service_started
+      backend:
+        condition: service_started
+    networks:
+      - detech
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    container_name: detech-frontend
+    restart: unless-stopped
+    environment:
+      - NEXT_PUBLIC_BACKEND_URL=http://localhost:8000
+      - NEXT_PUBLIC_SOLANA_RPC_URL=${SOLANA_RPC_URL:-https://api.devnet.solana.com}
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_started
+    networks:
+      - detech
+
+volumes:
+  redis-data:
+
+networks:
+  detech:
+    driver: bridge
+

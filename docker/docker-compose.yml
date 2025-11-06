@@ -1,0 +1,105 @@
+version: '3.8'
+
+services:
+  # Redis for shared state and caching
+  redis:
+    image: redis:7-alpine
+    container_name: detech-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - detech-network
+
+  # MQTT broker for Jetson-Backend communication
+  mqtt-broker:
+    image: eclipse-mosquitto:2.0
+    container_name: detech-mqtt
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
+    networks:
+      - detech-network
+
+  # Backend API (FastAPI)
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    container_name: detech-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - MQTT_BROKER_HOST=mqtt-broker
+      - MQTT_BROKER_PORT=1883
+      - SOLANA_RPC_URL=${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
+      - SWARM_API_URL=http://swarm:8001
+    volumes:
+      - ../backend:/app
+      - ../shared:/shared
+    depends_on:
+      - redis
+      - mqtt-broker
+      - swarm
+    networks:
+      - detech-network
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Swarm Agents (LangChain)
+  swarm:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.swarm
+    container_name: detech-swarm
+    ports:
+      - "8001:8001"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - ../swarm-agents:/app
+      - ../shared:/shared
+    depends_on:
+      - redis
+    networks:
+      - detech-network
+    command: python -m src.main
+
+  # Jetson Edge Simulator (for development/testing)
+  jetson-sim:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.jetson-sim
+    container_name: detech-jetson-sim
+    environment:
+      - MQTT_BROKER_HOST=mqtt-broker
+      - MQTT_BROKER_PORT=1883
+    volumes:
+      - ../jetson-edge:/app
+      - ../shared:/shared
+    depends_on:
+      - mqtt-broker
+    networks:
+      - detech-network
+    # Enable GPU access for Jetson simulation (if available)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  redis_data:
+
+networks:
+  detech-network:
+    driver: bridge

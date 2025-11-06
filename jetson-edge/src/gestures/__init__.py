@@ -1,0 +1,1 @@
+"""MediaPipe gesture recognition module"""
