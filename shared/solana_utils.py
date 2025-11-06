@@ -12,7 +12,6 @@ from typing import Optional
 import uuid
 
 from nacl.signing import SigningKey
-from solana.keypair import Keypair
 from solana.publickey import PublicKey
 from solana.rpc.async_api import AsyncClient
 from solana.rpc.commitment import Confirmed
@@ -50,12 +49,14 @@ class TransferResult:
     attempt: int
 
 
-def _load_keypair(secret: str) -> Keypair:
+def _load_keypair(secret: str) -> SigningKey:
     try:
         secret_bytes = base58.b58decode(secret)
     except ValueError as exc:  # pragma: no cover - defensive guard
         raise USDCTransferError("invalid base58 secret key") from exc
-    return Keypair.from_secret_key(secret_bytes)
+    if len(secret_bytes) == 32:
+        secret_bytes = secret_bytes + SigningKey(secret_bytes).verify_key.encode()
+    return SigningKey(secret_bytes[:32])
 
 
 def _to_raw_amount(amount: Decimal) -> int:
@@ -81,6 +82,7 @@ class SolanaUSDCTransactor:
     ) -> None:
         self._client = AsyncClient(rpc_url, commitment=Confirmed)
         self._agent = _load_keypair(agent_secret or DEFAULT_TEST_AGENT_SECRET)
+        self._agent_pubkey = PublicKey(self._agent.verify_key.encode())
         self._usdc_mint = PublicKey(usdc_mint)
         self._max_retries = max(1, max_retries)
         self._backoff_seconds = max(0.0, backoff_seconds)
@@ -88,7 +90,7 @@ class SolanaUSDCTransactor:
 
     @property
     def agent_pubkey(self) -> PublicKey:
-        return self._agent.pubkey()
+        return self._agent_pubkey
 
     async def close(self) -> None:
         await self._client.close()
@@ -101,8 +103,8 @@ class SolanaUSDCTransactor:
         reference: Optional[str] = None,
     ) -> TransferResult:
         payer = _load_keypair(user_secret)
-        source_owner = payer.pubkey()
-        destination_owner = self._agent.pubkey()
+        source_owner = PublicKey(payer.verify_key.encode())
+        destination_owner = self._agent_pubkey
 
         source_token = await self._ensure_token_account(owner=source_owner, payer=payer)
         destination_token = await self._ensure_agent_token_account()
@@ -141,36 +143,32 @@ class SolanaUSDCTransactor:
 
     async def _ensure_agent_token_account(self) -> PublicKey:
         if self._agent_ata is None:
-            self._agent_ata = await self._ensure_token_account(owner=self._agent.pubkey(), payer=self._agent)
+            self._agent_ata = await self._ensure_token_account(owner=self._agent_pubkey, payer=self._agent)
         return self._agent_ata
 
-    async def _ensure_token_account(self, *, owner: PublicKey, payer: Keypair) -> PublicKey:
+    async def _ensure_token_account(self, *, owner: PublicKey, payer: SigningKey) -> PublicKey:
         ata = get_associated_token_address(owner, self._usdc_mint)
         info = await self._client.get_account_info(ata)
         if info.value is None:
             transaction = Transaction()
             transaction.add(
                 create_associated_token_account(
-                    payer=payer.pubkey(),
+                    payer=PublicKey(payer.verify_key.encode()),
                     owner=owner,
                     mint=self._usdc_mint,
                 )
             )
             latest_blockhash = await self._client.get_latest_blockhash()
             transaction.recent_blockhash = latest_blockhash.value.blockhash
-            transaction.fee_payer = payer.pubkey()
-            transaction.sign(payer)
-            await self._client.send_transaction(
-                transaction,
-                payer,
-                opts=TxOpts(skip_preflight=False, preflight_commitment=Confirmed),
-            )
+            transaction.fee_payer = PublicKey(payer.verify_key.encode())
+            transaction.sign_partial(SigningKey(payer.encode() + payer.verify_key.encode()))
+            await self._client.send_transaction(transaction, SigningKey(payer.encode() + payer.verify_key.encode()), opts=TxOpts(skip_preflight=False, preflight_commitment=Confirmed))
         return ata
 
     async def _build_transfer_transaction(
         self,
         *,
-        payer: Keypair,
+        payer: SigningKey,
         source_token: PublicKey,
         destination_token: PublicKey,
         raw_amount: int,
@@ -180,7 +178,7 @@ class SolanaUSDCTransactor:
             source=source_token,
             mint=self._usdc_mint,
             dest=destination_token,
-            authority=payer.pubkey(),
+            authority=payer.verify_key.to_bytes(),
             amount=raw_amount,
             decimals=USDC_DECIMALS,
             signers=[],
@@ -189,7 +187,7 @@ class SolanaUSDCTransactor:
         transaction.add(transfer_checked(params))
         latest_blockhash = await self._client.get_latest_blockhash()
         transaction.recent_blockhash = latest_blockhash.value.blockhash
-        transaction.fee_payer = payer.pubkey()
+        transaction.fee_payer = payer.verify_key.to_bytes()
         transaction.sign(payer)
         return transaction
 

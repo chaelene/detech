@@ -12,7 +12,19 @@ from typing import Any, Dict, Optional
 
 from ..app.models.config import Settings
 from ..app.services.streaming import AlertManager
-from shared.solana_utils import SolanaUSDCTransactor, TransferResult, USDCTransferError
+
+try:  # Optional dependency; backend may run in mock mode without solana libraries
+    from shared.solana_utils import SolanaUSDCTransactor, TransferResult, USDCTransferError
+
+    _SOLANA_AVAILABLE = True
+except ModuleNotFoundError:  # pragma: no cover - solana stack optional in mock deployments
+    SolanaUSDCTransactor = None  # type: ignore[assignment]
+    TransferResult = Any  # type: ignore[assignment]
+
+    class USDCTransferError(Exception):
+        """Placeholder error when Solana stack is unavailable."""
+
+    _SOLANA_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +55,12 @@ class X402Handler:
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._charge_amount = Decimal(str(self._settings.x402_charge_per_interval_usdc))
         self._charge_interval = max(1, int(self._settings.x402_charge_interval_seconds))
+
+        if not _SOLANA_AVAILABLE and not self._settings.x402_mock_transfers:
+            raise RuntimeError(
+                "Solana libraries are missing but x402_mock_transfers is disabled. "
+                "Install the solana Python SDK or enable mock mode."
+            )
 
     async def process_alert(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         session_id = payload.get("session_id")
