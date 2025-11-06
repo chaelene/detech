@@ -105,7 +105,7 @@ class MQTTService:
                 logger.info("Connecting to MQTT broker %s:%s", self._hostname, self._port)
                 async with aiomqtt.Client(hostname=self._hostname, port=self._port) as client:
                     self._client = client
-                    async with client.messages() as messages:
+                    async with client.messages as messages:
                         await client.subscribe(self._alerts_topic)
                         self._connected.set()
                         logger.info("MQTT connected; subscribed to %s", self._alerts_topic)
