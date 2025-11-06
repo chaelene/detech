@@ -120,13 +120,24 @@ class MQTTService:
                                 await self._handle_alert_message(message)
                     else:
                         legacy_ctx = getattr(client, "messages", None)
-                        if not callable(legacy_ctx):
-                            raise AttributeError("aiomqtt client exposes no usable messages iterator")
-                        async with legacy_ctx() as messages:
+                        if callable(legacy_ctx):
+                            async with legacy_ctx() as messages:
+                                await client.subscribe(self._alerts_topic)
+                                self._connected.set()
+                                logger.info("MQTT connected; subscribed to %s", self._alerts_topic)
+                                async for message in messages:
+                                    await self._handle_alert_message(message)
+                        else:
+                            logger.warning(
+                                "aiomqtt client exposes no iterable messages helper; falling back to deliver_message loop"
+                            )
                             await client.subscribe(self._alerts_topic)
                             self._connected.set()
                             logger.info("MQTT connected; subscribed to %s", self._alerts_topic)
-                            async for message in messages:
+                            while not self._stop_event.is_set():
+                                message = await client.deliver_message()
+                                if message is None:
+                                    continue
                                 await self._handle_alert_message(message)
             except asyncio.CancelledError:
                 logger.debug("MQTT connection loop cancelled")
